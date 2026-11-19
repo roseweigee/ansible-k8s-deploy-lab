@@ -308,7 +308,34 @@ kubectl delete namespace vault
 kind delete cluster --name ansible-lab                # 不玩了再刪
 ```
 
-### 面試可以講的重點（HashiCorp Vault）
+#---
+
+## 實測紀錄（2026-11-19，MacBook Pro + kind v1.37.0）
+
+| 步驟 | 結果 |
+| --- | --- |
+| render + lint | `dev: manifests render, replicas=1`；ansible-lint production `Passed` |
+| 部署 dev | `changed=6 failed=0`；verify `1/1 replicas ready`、`Page OK: env=dev` |
+| 冪等性 | 第二次 `changed=0` |
+| 7-1 image 打錯 | 新 Pod `ErrImagePull` → `ImagePullBackOff`；Events：`...:does-not-exist: not found`；舊 Pod 持續 `Running` |
+| 7-2 變數錯 | 停在 Validate input variables；`assertion: app_replicas \| string is match('^[0-9]+$')` |
+| 7-3 沒給 vault 密碼 | `Attempting to decrypt but no vault secrets found`，第一個 task 前就停 |
+| prod（ansible-vault） | `2/2 replicas ready in hello-prod` |
+| Vault 安裝 | `vault-0`、`vault-agent-injector` 都 `1/1 Running` |
+| hashi_lookup | Secret `changed`，Deployment `ok`（Pod 沒重啟，見下方說明） |
+| hashi_injector | `vault-agent-init ran`；`Token delivered by Vault ... no K8s Secret`；`get secret` → `No resources found` |
+| 9-5 錯的 ServiceAccount | Pod 卡 `Init:0/1`；vault-agent-init log：`Code: 403 ... service account name not authorized` |
+
+### 實際踩到的坑
+
+1. **參數多了一個字元**：`-e app_rollout_timeout=60~`（終端機多送了 `~`）→ `argument 'wait_timeout' ... "60~" cannot be converted to an int`。module 先檢查參數型別，錯了就不會送到 cluster，所以 `get pods` 只看到舊 Pod。
+2. **Mac 上 worker 死掉**：`A worker was found in a dead state`（見 9-2 的說明），設 `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`、`no_proxy='*'` 解決。
+3. **hashi_lookup 換了 Secret，Pod 沒重啟**：Secret 是 `changed`，Deployment 是 `ok`。環境變數只在容器啟動時讀一次，所以 Pod 拿到的還是舊值。要嘛把 Secret 的 hash 也放進 pod template annotation 觸發 rollout，要嘛用 injector。
+4. **Available 不等於部署成功**：9-5 失敗時，Deployment status 同時是 `Available: True` 和 `unavailableReplicas: 1`。只等 Available 條件會把壞掉的 rollout 判成成功，所以 role 用 `wait: true` 等 rollout 本身完成。
+
+---
+
+## 面試可以講的重點（HashiCorp Vault）
 
 1. **ansible-vault 和 HashiCorp Vault 差在哪**：ansible-vault 是「加密檔案」，密碼要另外保管，誰有密碼誰就能看全部；HashiCorp Vault 是「密鑰服務」，每個應用只拿得到自己那條路徑，誰在什麼時候讀了什麼都有紀錄。
 2. **Kubernetes auth**：Pod 不需要事先知道任何密碼，用 ServiceAccount 證明自己是誰，Vault 再依 role 決定給什麼。
