@@ -16,3 +16,17 @@ app_resources:
 
 # How long to wait for the Deployment to become Available.
 app_rollout_timeout: 120
+
+# Where the API token comes from:
+#   ansible        - from an Ansible variable (dev: plain; prod: ansible-vault), stored as a K8s Secret
+#   hashi_lookup   - Ansible reads it from HashiCorp Vault at deploy time, stored as a K8s Secret
+#   hashi_injector - no K8s Secret; the Vault Agent Injector writes it into the pod at start-up
+app_secret_mode: ansible
+app_service_account: "{{ app_name }}"
+
+# HashiCorp Vault settings (used by the hashi_* modes and playbooks/vault-configure.yml).
+# The Vault token is read from the VAULT_TOKEN environment variable, never from a file.
+app_vault_url: http://127.0.0.1:8200
+app_vault_kv_mount: secret
+app_vault_secret_path: "{{ app_name }}/{{ app_env }}"
+app_vault_k8s_role: "{{ app_name }}-{{ app_env }}"

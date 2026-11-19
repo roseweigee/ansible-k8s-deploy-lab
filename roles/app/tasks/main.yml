@@ -1,4 +1,19 @@
 ---
+- name: Check the secret mode
+  ansible.builtin.assert:
+    that:
+      - app_secret_mode in ['ansible', 'hashi_lookup', 'hashi_injector']
+    fail_msg: "app_secret_mode must be ansible, hashi_lookup or hashi_injector (got {{ app_secret_mode }})"
+    quiet: true
+
+- name: Read the API token from HashiCorp Vault
+  when: app_secret_mode == 'hashi_lookup'
+  ansible.builtin.set_fact:
+    app_api_token: >-
+      {{ lookup('community.hashi_vault.vault_kv2_get', app_vault_secret_path,
+                engine_mount_point=app_vault_kv_mount, url=app_vault_url).secret.api_token }}
+  no_log: true
+
 - name: Validate input variables
   ansible.builtin.assert:
     that:
@@ -6,7 +21,7 @@
       - app_namespace is defined and app_namespace | length > 0
       - app_replicas | string is match('^[0-9]+$')
       - app_replicas | int >= 1
-      - app_api_token is defined and app_api_token | length > 0
+      - app_secret_mode == 'hashi_injector' or (app_api_token is defined and app_api_token | length > 0)
     fail_msg: >-
       Invalid variables: app_name must be a DNS-1123 name, app_namespace must be set,
       app_replicas must be a whole number >= 1, and app_api_token must be set
@@ -26,6 +41,13 @@
           app.kubernetes.io/managed-by: ansible
           env: "{{ app_env }}"
 
+- name: Apply ServiceAccount (Vault's Kubernetes auth binds to it)
+  kubernetes.core.k8s:
+    context: "{{ app_k8s_context | default(omit, true) }}"
+    state: present
+    apply: true
+    template: serviceaccount.yaml.j2
+
 - name: Render page content
   ansible.builtin.set_fact:
     app_index_html: "{{ lookup('ansible.builtin.template', 'index.html.j2') }}"
@@ -34,19 +56,32 @@
   kubernetes.core.k8s:
     context: "{{ app_k8s_context | default(omit, true) }}"
     state: present
+    apply: true
     template: configmap.yaml.j2
 
 - name: Apply Secret with the API token
+  when: app_secret_mode != 'hashi_injector'
   kubernetes.core.k8s:
     context: "{{ app_k8s_context | default(omit, true) }}"
     state: present
+    apply: true
     template: secret.yaml.j2
   no_log: true
+
+- name: Remove the K8s Secret (the injector delivers the token instead)
+  when: app_secret_mode == 'hashi_injector'
+  kubernetes.core.k8s:
+    context: "{{ app_k8s_context | default(omit, true) }}"
+    state: absent
+    kind: Secret
+    namespace: "{{ app_namespace }}"
+    name: "{{ app_name }}-token"
 
 - name: Apply Deployment and wait until it is Available
   kubernetes.core.k8s:
     context: "{{ app_k8s_context | default(omit, true) }}"
     state: present
+    apply: true
     template: deployment.yaml.j2
     wait: true
     wait_condition:
@@ -58,4 +93,5 @@
   kubernetes.core.k8s:
     context: "{{ app_k8s_context | default(omit, true) }}"
     state: present
+    apply: true
     template: service.yaml.j2

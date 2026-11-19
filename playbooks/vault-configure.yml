@@ -1,0 +1,83 @@
+---
+# Configures HashiCorp Vault for one environment (the inventory you pass with -i):
+#   1. Kubernetes auth method, so pods can log in with their ServiceAccount token
+#   2. A read-only policy for this app's secret path
+#   3. A Kubernetes auth role bound to the app's ServiceAccount and namespace
+#   4. The API token itself, in the KV v2 engine
+#
+# Needs a port-forward to Vault and the token in the environment:
+#   kubectl port-forward -n vault svc/vault 8200:8200
+#   export VAULT_TOKEN=root
+- name: Configure HashiCorp Vault for the hello app
+  hosts: k8s_control
+  gather_facts: false
+  vars_prompt:
+    - name: seed_api_token
+      prompt: "API token to store in Vault for this environment"
+      private: true
+  module_defaults:
+    group/community.hashi_vault.vault:
+      url: "{{ app_vault_url | default('http://127.0.0.1:8200') }}"
+  vars:
+    kv_mount: "{{ app_vault_kv_mount | default('secret') }}"
+    secret_path: "{{ app_vault_secret_path | default('hello/' ~ app_env) }}"
+    k8s_role: "{{ app_vault_k8s_role | default('hello-' ~ app_env) }}"
+    service_account: "{{ app_service_account | default('hello') }}"
+    policy_name: "hello-{{ app_env }}-read"
+  tasks:
+    - name: Check VAULT_TOKEN is set
+      ansible.builtin.assert:
+        that: lookup('ansible.builtin.env', 'VAULT_TOKEN') | length > 0
+        fail_msg: "Run: export VAULT_TOKEN=root   (and keep the port-forward to Vault running)"
+        quiet: true
+
+    - name: List enabled auth methods
+      community.hashi_vault.vault_read:
+        path: sys/auth
+      register: auth_methods
+
+    - name: Enable the Kubernetes auth method
+      when: "'kubernetes/' not in auth_methods.data.data"
+      community.hashi_vault.vault_write:
+        path: sys/auth/kubernetes
+        data:
+          type: kubernetes
+
+    - name: Point Kubernetes auth at the cluster API (Vault runs in-cluster, uses its own SA)
+      community.hashi_vault.vault_write:
+        path: auth/kubernetes/config
+        data:
+          kubernetes_host: https://kubernetes.default.svc:443
+
+    - name: Create a read-only policy for this app's secret
+      community.hashi_vault.vault_write:
+        path: "sys/policies/acl/{{ policy_name }}"
+        data:
+          policy: |
+            path "{{ kv_mount }}/data/{{ secret_path }}" {
+              capabilities = ["read"]
+            }
+
+    - name: Bind the policy to the app's ServiceAccount and namespace
+      community.hashi_vault.vault_write:
+        path: "auth/kubernetes/role/{{ k8s_role }}"
+        data:
+          bound_service_account_names: ["{{ service_account }}"]
+          bound_service_account_namespaces: ["{{ app_namespace }}"]
+          policies: ["{{ policy_name }}"]
+          ttl: 1h
+
+    - name: Store the API token (KV v2)
+      community.hashi_vault.vault_kv2_write:
+        engine_mount_point: "{{ kv_mount }}"
+        path: "{{ secret_path }}"
+        data:
+          api_token: "{{ seed_api_token }}"
+      no_log: true
+
+    - name: Show what was configured
+      ansible.builtin.debug:
+        msg:
+          - "secret:  {{ kv_mount }}/{{ secret_path }} (key api_token)"
+          - "policy:  {{ policy_name }} (read only)"
+          - "role:    {{ k8s_role }} -> ServiceAccount {{ service_account }} in {{ app_namespace }}"

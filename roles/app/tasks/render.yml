@@ -1,0 +1,19 @@
+---
+# Offline rendering used by tests/render.yml: writes every manifest to app_render_dir
+# without touching a cluster.
+- name: Render page content
+  ansible.builtin.set_fact:
+    app_index_html: "{{ lookup('ansible.builtin.template', 'index.html.j2') }}"
+
+- name: Create output directory
+  ansible.builtin.file:
+    path: "{{ app_render_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render templates
+  ansible.builtin.template:
+    src: "{{ item }}.yaml.j2"
+    dest: "{{ app_render_dir }}/{{ item }}.yaml"
+    mode: "0644"
+  loop: [serviceaccount, configmap, secret, deployment, service]

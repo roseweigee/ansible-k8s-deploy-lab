@@ -20,7 +20,17 @@ spec:
       annotations:
         # Changes when the page content changes, so a new ConfigMap triggers a rollout.
         checksum/html: "{{ app_index_html | hash('sha256') }}"
+{% if app_secret_mode == 'hashi_injector' %}
+        # Vault Agent Injector: an init container logs in to Vault with this pod's
+        # ServiceAccount token and writes the secret to /vault/secrets/api-token.
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+        vault.hashicorp.com/role: "{{ app_vault_k8s_role }}"
+        vault.hashicorp.com/agent-inject-secret-api-token: "{{ app_vault_kv_mount }}/data/{{ app_vault_secret_path }}"
+        vault.hashicorp.com/agent-inject-template-api-token: '{% raw %}{{- with secret "{% endraw %}{{ app_vault_kv_mount }}/data/{{ app_vault_secret_path }}{% raw %}" -}}{{ .Data.data.api_token }}{{- end -}}{% endraw %}'
+{% endif %}
     spec:
+      serviceAccountName: {{ app_service_account }}
       securityContext:
         runAsNonRoot: true
       containers:
@@ -29,12 +39,14 @@ spec:
           ports:
             - name: http
               containerPort: {{ app_port }}
+{% if app_secret_mode != 'hashi_injector' %}
           env:
             - name: API_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ app_name }}-token
                   key: API_TOKEN
+{% endif %}
           readinessProbe:
             httpGet: { path: /, port: http }
             periodSeconds: 5

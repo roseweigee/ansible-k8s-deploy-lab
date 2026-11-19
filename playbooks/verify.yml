@@ -39,6 +39,7 @@
         context: "{{ app_k8s_context | default(omit, true) }}"
         namespace: "{{ app_namespace }}"
         pod: "{{ pods.resources[0].metadata.name }}"
+        container: web
         command: wget -qO- http://127.0.0.1:8080/
       register: page
       changed_when: false
@@ -49,3 +50,38 @@
           - "'env=' ~ app_env in page.stdout"
         fail_msg: "Page did not contain env={{ app_env }}: {{ page.stdout }}"
         success_msg: "Page OK: env={{ app_env }}"
+
+    - name: Check how the token was delivered (Vault Agent Injector)
+      when: app_secret_mode | default('ansible') == 'hashi_injector'
+      block:
+        - name: Check the pod ran the vault-agent-init container
+          ansible.builtin.assert:
+            that:
+              - "'vault-agent-init' in (pods.resources[0].spec.initContainers | default([]) | map(attribute='name'))"
+            fail_msg: "No vault-agent-init container: is the injector installed and the annotation applied?"
+            success_msg: "vault-agent-init ran in {{ pods.resources[0].metadata.name }}"
+
+        - name: Check the token file exists and is not empty (without printing it)
+          kubernetes.core.k8s_exec:
+            context: "{{ app_k8s_context | default(omit, true) }}"
+            namespace: "{{ app_namespace }}"
+            pod: "{{ pods.resources[0].metadata.name }}"
+            container: web
+            command: sh -c 'test -s /vault/secrets/api-token && echo present'
+          register: token_file
+          changed_when: false
+
+        - name: Check no K8s Secret holds the token
+          kubernetes.core.k8s_info:
+            context: "{{ app_k8s_context | default(omit, true) }}"
+            kind: Secret
+            namespace: "{{ app_namespace }}"
+            name: "{{ app_name }}-token"
+          register: k8s_secret
+
+        - name: Report
+          ansible.builtin.assert:
+            that:
+              - "'present' in token_file.stdout"
+              - k8s_secret.resources | length == 0
+            success_msg: "Token delivered by Vault to /vault/secrets/api-token; no K8s Secret in {{ app_namespace }}"

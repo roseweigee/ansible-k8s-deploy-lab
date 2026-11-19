@@ -26,10 +26,13 @@ kubectl config current-context        # 應該是 kind-ansible-lab
 cd ~/ansible-k8s-deploy-lab
 python3 -m venv .venv
 source .venv/bin/activate
-pip install ansible-core kubernetes ansible-lint
+pip install ansible-core kubernetes hvac ansible-lint
 ansible-galaxy collection install -r requirements.yml
 ansible --version
 ```
+
+- `hvac` 是 HashiCorp Vault 的 Python client，第 9 步會用到。
+- 第 9 步還需要 `helm`：`helm version` 看有沒有，沒有就 `brew install helm`。
 
 為什麼用 venv：Ansible 的 k8s module 要用到 Python 的 `kubernetes` 套件，裝在 venv 裡不會弄亂 Mac 系統的 Python。inventory 裡的 `ansible_python_interpreter: "{{ ansible_playbook_python }}"` 就是讓 Ansible 用同一個 venv 的 Python。
 
@@ -162,13 +165,146 @@ ansible-playbook playbooks/deploy.yml -vvv 2>&1 | less
 - 可以看到每個 task 用的 Python、送給 module 的參數、API 回來的結果。
 - Secret 那個 task 只會顯示 `censored`（因為 `no_log`）。
 
-## 8. 清掉
+## 8. 清掉 prod
+
+接下來第 9 步會沿用 dev（`hello-dev`）和這個 cluster，所以這裡只清 prod：
 
 ```bash
-ansible-playbook playbooks/teardown.yml
 ansible-playbook -i inventories/prod/hosts.yml playbooks/teardown.yml --ask-vault-pass
-kind delete cluster --name ansible-lab      # 不玩了再刪
 ```
+
+---
+
+## 9. 進階：改用 HashiCorp Vault 管密鑰
+
+前面 prod 用的是 **ansible-vault**：密鑰加密放在 git 裡，部署時解開，再建成 K8s Secret。
+這一步改用 **HashiCorp Vault**：密鑰集中放在 Vault 服務裡，有權限控管和稽核紀錄。分兩種用法，兩種都做。
+
+| 模式（`app_secret_mode`） | 密鑰從哪裡來 | K8s 裡有沒有 Secret |
+| --- | --- | --- |
+| `ansible`（預設） | Ansible 變數（prod 用 ansible-vault 加密） | 有 |
+| `hashi_lookup` | 部署時 Ansible 去 HashiCorp Vault 讀 | 有 |
+| `hashi_injector` | Pod 啟動時自己用 ServiceAccount 登入 Vault 拿 | **沒有** |
+
+### 9-1 安裝 Vault（dev 模式）
+
+```bash
+ansible-playbook playbooks/vault-install.yml
+kubectl get pods -n vault          # vault-0 和 vault-agent-injector-xxx 都要 Running
+```
+
+- dev 模式：資料放記憶體、自動解封、root token 是 `root`。只適合 lab，Vault 重啟資料就沒了。
+- 用的是 `kubernetes.core.helm` module，所以連 Helm 安裝也是 Ansible 管的。
+
+📸 `12-vault-install.png`
+
+### 9-2 設定 Vault
+
+開**另一個終端機**，讓它一直開著：
+
+```bash
+kubectl port-forward -n vault svc/vault 8200:8200
+```
+
+回到原本的終端機：
+
+```bash
+export VAULT_TOKEN=root
+ansible-playbook playbooks/vault-configure.yml       # 會要你輸入要存的 token，自己編一個
+```
+
+它做了四件事：
+1. 開啟 **Kubernetes auth**：讓 Pod 可以用自己的 ServiceAccount token 登入 Vault。
+2. 建 policy `hello-dev-read`：**只能讀** `secret/hello/dev` 這一個路徑。
+3. 建 role `hello-dev`：只有 namespace `hello-dev` 裡、名叫 `hello` 的 ServiceAccount 才能用這個 policy。
+4. 把 token 存進 KV v2：`secret/hello/dev`。
+
+注意：`vault_write` 這類 module 每次都會回報 changed（它不會先比對），所以這個 playbook 第二次跑不會是 `changed=0`。只有 `vault_kv2_write` 會先比對內容。面試被問冪等性時，這是一個誠實的例外。
+
+📸 `13-vault-configure.png`
+
+### 9-3 模式一：`hashi_lookup`（Ansible 讀 Vault）
+
+```bash
+ansible-playbook playbooks/deploy.yml -e app_secret_mode=hashi_lookup
+ansible-playbook playbooks/verify.yml
+```
+
+- 密鑰不再放在 git 的任何地方，部署時才從 Vault 讀。
+- 但 K8s 裡還是會有 Secret，用 `kubectl get secret hello-token -n hello-dev` 看得到。
+
+📸 `14-hashi-lookup.png`
+
+### 9-4 模式二：`hashi_injector`（Pod 自己去 Vault 拿）
+
+```bash
+ansible-playbook playbooks/deploy.yml -e app_secret_mode=hashi_injector
+ansible-playbook playbooks/verify.yml -e app_secret_mode=hashi_injector
+kubectl get pod -n hello-dev -o jsonpath='{.items[0].spec.initContainers[*].name}'; echo
+kubectl get secret -n hello-dev                     # hello-token 已經不見了
+```
+
+流程：
+1. Deployment 的 pod template 多了 `vault.hashicorp.com/*` annotation。
+2. Injector（一個 mutating webhook）看到後，幫 Pod 加一個 `vault-agent-init` init container。
+3. init container 用 Pod 的 ServiceAccount token 登入 Vault（role `hello-dev`），把密鑰寫到 `/vault/secrets/api-token`。
+4. 主程式啟動時直接讀檔案，**K8s 的 etcd 裡完全沒有這個密鑰**。
+
+`verify.yml` 會檢查：有 `vault-agent-init`、檔案存在且不是空的（不會印出內容）、K8s Secret 已經刪掉。
+
+有設 `agent-pre-populate-only: "true"`：只在啟動時拿一次，不留 sidecar，比較省資源；代價是 Vault 裡的值改了，Pod 要重啟才會拿到新的。
+
+📸 `15-hashi-injector.png`
+
+### 9-5 Vault 故障演練
+
+**A. 忘了 port-forward**
+
+把 port-forward 那個終端機關掉，再跑：
+
+```bash
+ansible-playbook playbooks/deploy.yml -e app_secret_mode=hashi_lookup
+```
+
+- 現象：task 失敗，結果顯示 `censored`，因為那個 task 有 `no_log`。
+- 但上面會先印出真正原因：`Connection refused ... port=8200`。
+- 重點：`no_log` 保護了密鑰，也會把錯誤藏起來。排查時要往上看 lookup 的錯誤訊息，不要只看 `censored`。
+
+**B. ServiceAccount 對不上**
+
+```bash
+ansible-playbook playbooks/deploy.yml -e app_secret_mode=hashi_injector -e app_service_account=wrong-sa -e app_rollout_timeout=60
+```
+
+- 現象：等 60 秒失敗。新 Pod 卡在 `Init:0/1`。
+- 排查：
+
+```bash
+kubectl get pods -n hello-dev
+kubectl logs -n hello-dev <卡住的 pod> -c vault-agent-init
+```
+
+  log 會看到 `permission denied` 或 `service account name not authorized`：Vault 的 role 只允許 `hello` 這個 ServiceAccount。
+- 修復：不帶 `-e app_service_account` 再部署一次。
+
+📸 `16-drill-vault-sa.png`
+
+### 9-6 全部清掉
+
+```bash
+ansible-playbook playbooks/teardown.yml               # 刪 hello-dev
+helm uninstall vault -n vault
+kubectl delete namespace vault
+kind delete cluster --name ansible-lab                # 不玩了再刪
+```
+
+### 面試可以講的重點（HashiCorp Vault）
+
+1. **ansible-vault 和 HashiCorp Vault 差在哪**：ansible-vault 是「加密檔案」，密碼要另外保管，誰有密碼誰就能看全部；HashiCorp Vault 是「密鑰服務」，每個應用只拿得到自己那條路徑，誰在什麼時候讀了什麼都有紀錄。
+2. **Kubernetes auth**：Pod 不需要事先知道任何密碼，用 ServiceAccount 證明自己是誰，Vault 再依 role 決定給什麼。
+3. **Injector 的好處**：密鑰不進 etcd、不進 git、不進 Ansible 的變數。銀行稽核最在意這點。
+4. **最小權限**：policy 只給 read、只給一個路徑；role 綁死 namespace 和 ServiceAccount。
+5. **誠實說明**：這是 dev 模式的 lab，正式環境還要處理 HA、unseal（例如用 KMS auto-unseal）、稽核 log 和備份，這些沒有做。
 
 ---
 

@@ -3,38 +3,20 @@
 # it parses as YAML with the expected kind. Needs no cluster.
 #   ansible-playbook tests/render.yml                       (dev)
 #   ansible-playbook -i inventories/prod/hosts.yml tests/render.yml -e vault_app_api_token=test
+#   ansible-playbook tests/render.yml -e app_secret_mode=hashi_injector
 - name: Render manifests without a cluster
   hosts: k8s_control
   gather_facts: false
   vars:
-    out_dir: "{{ playbook_dir }}/../out/{{ app_env }}"
+    out_dir: "{{ playbook_dir }}/../out/{{ app_env | default('dev') }}-{{ app_secret_mode | default('ansible') }}"
   tasks:
-    - name: Load role defaults
-      ansible.builtin.include_vars:
-        file: "{{ playbook_dir }}/../roles/app/defaults/main.yml"
-        name: role_defaults
-
-    - name: Apply defaults for anything the inventory did not set
-      ansible.builtin.set_fact:
-        "{{ item.key }}": "{{ lookup('ansible.builtin.vars', item.key, default=item.value) }}"
-      loop: "{{ role_defaults | dict2items }}"
-
-    - name: Render page content
-      ansible.builtin.set_fact:
-        app_index_html: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../roles/app/templates/index.html.j2') }}"
-
-    - name: Create output directory
-      ansible.builtin.file:
-        path: "{{ out_dir }}"
-        state: directory
-        mode: "0755"
-
-    - name: Render templates
-      ansible.builtin.template:
-        src: "{{ playbook_dir }}/../roles/app/templates/{{ item }}.yaml.j2"
-        dest: "{{ out_dir }}/{{ item }}.yaml"
-        mode: "0644"
-      loop: [configmap, secret, deployment, service]
+    - name: Render all manifests with the role's own defaults and templates
+      ansible.builtin.include_role:
+        name: app
+        tasks_from: render.yml
+        public: true
+      vars:
+        app_render_dir: "{{ out_dir }}"
 
     - name: Check each rendered file parses and has the right kind
       ansible.builtin.assert:
@@ -42,6 +24,7 @@
           - (lookup('ansible.builtin.file', out_dir ~ '/' ~ item.file ~ '.yaml') | from_yaml).kind == item.kind
         quiet: true
       loop:
+        - { file: serviceaccount, kind: ServiceAccount }
         - { file: configmap, kind: ConfigMap }
         - { file: secret, kind: Secret }
         - { file: deployment, kind: Deployment }
@@ -52,3 +35,25 @@
         that:
           - (lookup('ansible.builtin.file', out_dir ~ '/deployment.yaml') | from_yaml).spec.replicas == (app_replicas | int)
         success_msg: "{{ app_env }}: manifests render, replicas={{ app_replicas }}"
+
+    - name: Read the rendered pod template
+      ansible.builtin.set_fact:
+        rendered_pod: "{{ (lookup('ansible.builtin.file', out_dir ~ '/deployment.yaml') | from_yaml).spec.template }}"
+
+    - name: "Token from a K8s Secret (modes: ansible, hashi_lookup)"
+      when: app_secret_mode != 'hashi_injector'
+      ansible.builtin.assert:
+        that:
+          - rendered_pod.spec.containers[0].env[0].valueFrom.secretKeyRef.name == app_name ~ '-token'
+          - "'vault.hashicorp.com/agent-inject' not in rendered_pod.metadata.annotations"
+        success_msg: "{{ app_secret_mode }}: token comes from Secret {{ app_name }}-token"
+
+    - name: "Token from the Vault Agent Injector (mode: hashi_injector)"
+      when: app_secret_mode == 'hashi_injector'
+      ansible.builtin.assert:
+        that:
+          - rendered_pod.metadata.annotations['vault.hashicorp.com/agent-inject'] == 'true'
+          - rendered_pod.metadata.annotations['vault.hashicorp.com/role'] == app_vault_k8s_role
+          - rendered_pod.spec.containers[0].env is not defined
+          - rendered_pod.spec.serviceAccountName == app_service_account
+        success_msg: "hashi_injector: no Secret env, Vault annotations present (role {{ app_vault_k8s_role }})"

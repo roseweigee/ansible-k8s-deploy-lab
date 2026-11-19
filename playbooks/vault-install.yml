@@ -1,0 +1,44 @@
+---
+# Installs HashiCorp Vault in dev mode plus the Vault Agent Injector, with Helm.
+# Dev mode = in-memory storage, auto-unsealed, root token "root". Lab use only.
+- name: Install HashiCorp Vault (dev mode) on the cluster
+  hosts: k8s_control
+  gather_facts: false
+  vars:
+    vault_namespace: vault
+    vault_dev_root_token: root
+  tasks:
+    - name: Add the HashiCorp Helm repository
+      kubernetes.core.helm_repository:
+        name: hashicorp
+        repo_url: https://helm.releases.hashicorp.com
+
+    - name: Install or upgrade the Vault chart
+      kubernetes.core.helm:
+        kube_context: "{{ app_k8s_context | default(omit, true) }}"
+        name: vault
+        chart_ref: hashicorp/vault
+        release_namespace: "{{ vault_namespace }}"
+        create_namespace: true
+        update_repo_cache: true
+        wait: true
+        wait_timeout: 5m
+        values:
+          server:
+            dev:
+              enabled: true
+              devRootToken: "{{ vault_dev_root_token }}"
+          injector:
+            enabled: true
+
+    - name: Wait for the Vault server pod to be ready
+      kubernetes.core.k8s_info:
+        context: "{{ app_k8s_context | default(omit, true) }}"
+        kind: Pod
+        namespace: "{{ vault_namespace }}"
+        name: vault-0
+        wait: true
+        wait_condition:
+          type: Ready
+          status: "True"
+        wait_timeout: 180
