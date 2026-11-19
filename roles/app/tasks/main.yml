@@ -77,16 +77,16 @@
     namespace: "{{ app_namespace }}"
     name: "{{ app_name }}-token"
 
-- name: Apply Deployment and wait until it is Available
+# wait: true without a wait_condition waits for the rollout itself: the new
+# generation observed and every replica updated and available. A condition of
+# Available would pass at once while old pods still serve, hiding a broken rollout.
+- name: Apply Deployment and wait until the rollout completes
   kubernetes.core.k8s:
     context: "{{ app_k8s_context | default(omit, true) }}"
     state: present
     apply: true
     template: deployment.yaml.j2
     wait: true
-    wait_condition:
-      type: Available
-      status: "True"
     wait_timeout: "{{ app_rollout_timeout }}"
 
 - name: Apply Service

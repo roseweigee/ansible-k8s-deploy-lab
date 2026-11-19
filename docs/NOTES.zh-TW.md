@@ -121,7 +121,8 @@ ansible-playbook -i inventories/prod/hosts.yml playbooks/verify.yml --ask-vault-
 ansible-playbook playbooks/deploy.yml -e app_image=nginxinc/nginx-unprivileged:does-not-exist -e app_rollout_timeout=60
 ```
 
-- 現象：「Apply Deployment and wait」那個 task 等 60 秒後失敗。
+- 現象：「Apply Deployment and wait until the rollout completes」那個 task 等 60 秒後失敗。
+- 第一版的坑（GitHub Actions 抓到的）：原本寫 `wait_condition: type: Available`，結果 image 打錯 playbook 竟然顯示成功。因為舊 Pod 還在跑，Deployment 一直是 Available，條件馬上成立，沒等新版本。改成只寫 `wait: true`，module 會等 rollout 本身完成（新的 generation 被看到、每個 replica 都更新且 available），壞掉的 rollout 才會被擋下來。面試可以講：「部署成功」要看 rollout，不是看服務還活著。
 - 排查：
 
 ```bash
