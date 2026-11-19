@@ -1,0 +1,61 @@
+---
+- name: Validate input variables
+  ansible.builtin.assert:
+    that:
+      - app_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - app_namespace is defined and app_namespace | length > 0
+      - app_replicas | string is match('^[0-9]+$')
+      - app_replicas | int >= 1
+      - app_api_token is defined and app_api_token | length > 0
+    fail_msg: >-
+      Invalid variables: app_name must be a DNS-1123 name, app_namespace must be set,
+      app_replicas must be a whole number >= 1, and app_api_token must be set
+      (prod reads it from the ansible-vault file).
+    quiet: true
+
+- name: Ensure namespace exists
+  kubernetes.core.k8s:
+    context: "{{ app_k8s_context | default(omit, true) }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ app_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: ansible
+          env: "{{ app_env }}"
+
+- name: Render page content
+  ansible.builtin.set_fact:
+    app_index_html: "{{ lookup('ansible.builtin.template', 'index.html.j2') }}"
+
+- name: Apply ConfigMap with the page content
+  kubernetes.core.k8s:
+    context: "{{ app_k8s_context | default(omit, true) }}"
+    state: present
+    template: configmap.yaml.j2
+
+- name: Apply Secret with the API token
+  kubernetes.core.k8s:
+    context: "{{ app_k8s_context | default(omit, true) }}"
+    state: present
+    template: secret.yaml.j2
+  no_log: true
+
+- name: Apply Deployment and wait until it is Available
+  kubernetes.core.k8s:
+    context: "{{ app_k8s_context | default(omit, true) }}"
+    state: present
+    template: deployment.yaml.j2
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: "{{ app_rollout_timeout }}"
+
+- name: Apply Service
+  kubernetes.core.k8s:
+    context: "{{ app_k8s_context | default(omit, true) }}"
+    state: present
+    template: service.yaml.j2

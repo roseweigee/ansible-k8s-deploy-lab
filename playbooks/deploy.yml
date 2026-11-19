@@ -1,0 +1,6 @@
+---
+- name: Deploy the hello app to Kubernetes
+  hosts: k8s_control
+  gather_facts: false
+  roles:
+    - role: app

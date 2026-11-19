@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ app_name }}
+  namespace: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ app_name }}
+    app.kubernetes.io/version: "{{ app_version }}"
+    app.kubernetes.io/managed-by: ansible
+spec:
+  replicas: {{ app_replicas | int }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ app_name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ app_name }}
+        app.kubernetes.io/version: "{{ app_version }}"
+      annotations:
+        # Changes when the page content changes, so a new ConfigMap triggers a rollout.
+        checksum/html: "{{ app_index_html | hash('sha256') }}"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: web
+          image: {{ app_image }}
+          ports:
+            - name: http
+              containerPort: {{ app_port }}
+          env:
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ app_name }}-token
+                  key: API_TOKEN
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: {{ app_resources.requests.cpu }}
+              memory: {{ app_resources.requests.memory }}
+            limits:
+              cpu: {{ app_resources.limits.cpu }}
+              memory: {{ app_resources.limits.memory }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - name: html
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+      volumes:
+        - name: html
+          configMap:
+            name: {{ app_name }}-html

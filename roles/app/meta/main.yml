@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: app
+  author: Rose Wei
+  description: Deploy a small web app (ConfigMap, Secret, Deployment, Service) to Kubernetes
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: GenericLinux
+      versions: [all]
+dependencies: []

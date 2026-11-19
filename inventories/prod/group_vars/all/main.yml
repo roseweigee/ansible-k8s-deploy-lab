@@ -1,0 +1,13 @@
+---
+app_env: prod
+app_namespace: hello-prod
+app_replicas: 2
+app_version: "1.0.0"
+app_message: "Hello from the prod environment"
+
+# Points at the encrypted value in vault.yml (create it with ansible-vault, see docs).
+app_api_token: "{{ vault_app_api_token }}"
+
+app_resources:
+  requests: { cpu: 50m, memory: 32Mi }
+  limits: { cpu: 200m, memory: 64Mi }

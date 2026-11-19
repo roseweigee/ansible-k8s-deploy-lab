@@ -1,0 +1,18 @@
+---
+app_name: hello
+app_image: nginxinc/nginx-unprivileged:1.27-alpine
+app_port: 8080
+app_replicas: 1
+app_version: "1.0.0"
+app_message: "Hello"
+app_env: dev
+
+# Optional: kubeconfig context to target. Leave empty to use the current context.
+app_k8s_context: ""
+
+app_resources:
+  requests: { cpu: 25m, memory: 16Mi }
+  limits: { cpu: 100m, memory: 64Mi }
+
+# How long to wait for the Deployment to become Available.
+app_rollout_timeout: 120

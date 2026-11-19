@@ -1,0 +1,5 @@
+out/
+inventories/*/group_vars/all/vault.yml
+.vault_pass*
+*.retry
+.venv/

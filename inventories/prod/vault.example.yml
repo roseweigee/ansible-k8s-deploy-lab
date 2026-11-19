@@ -1,0 +1,6 @@
+---
+# Copy to vault.yml, set a real value, then encrypt it:
+#   cp inventories/prod/vault.example.yml inventories/prod/group_vars/all/vault.yml
+#   ansible-vault encrypt inventories/prod/group_vars/all/vault.yml
+# vault.yml is git-ignored; only this example is committed.
+vault_app_api_token: "change-me"

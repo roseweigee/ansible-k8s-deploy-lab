@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ app_name }}-html
+  namespace: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ app_name }}
+    app.kubernetes.io/managed-by: ansible
+data:
+  index.html: |
+{{ app_index_html | indent(4, true) }}

@@ -1,0 +1,9 @@
+---
+app_env: dev
+app_namespace: hello-dev
+app_replicas: 1
+app_version: "1.0.0"
+app_message: "Hello from the dev environment"
+
+# Dev uses a plain demo token. Prod keeps its token in an ansible-vault file.
+app_api_token: "dev-demo-token"

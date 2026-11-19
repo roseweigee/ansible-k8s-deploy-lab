@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name }}
+  namespace: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ app_name }}
+    app.kubernetes.io/managed-by: ansible
+spec:
+  selector:
+    app.kubernetes.io/name: {{ app_name }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,54 @@
+---
+# Offline test: renders every manifest template for the chosen inventory and checks
+# it parses as YAML with the expected kind. Needs no cluster.
+#   ansible-playbook tests/render.yml                       (dev)
+#   ansible-playbook -i inventories/prod/hosts.yml tests/render.yml -e vault_app_api_token=test
+- name: Render manifests without a cluster
+  hosts: k8s_control
+  gather_facts: false
+  vars:
+    out_dir: "{{ playbook_dir }}/../out/{{ app_env }}"
+  tasks:
+    - name: Load role defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../roles/app/defaults/main.yml"
+        name: role_defaults
+
+    - name: Apply defaults for anything the inventory did not set
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ lookup('ansible.builtin.vars', item.key, default=item.value) }}"
+      loop: "{{ role_defaults | dict2items }}"
+
+    - name: Render page content
+      ansible.builtin.set_fact:
+        app_index_html: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../roles/app/templates/index.html.j2') }}"
+
+    - name: Create output directory
+      ansible.builtin.file:
+        path: "{{ out_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render templates
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/app/templates/{{ item }}.yaml.j2"
+        dest: "{{ out_dir }}/{{ item }}.yaml"
+        mode: "0644"
+      loop: [configmap, secret, deployment, service]
+
+    - name: Check each rendered file parses and has the right kind
+      ansible.builtin.assert:
+        that:
+          - (lookup('ansible.builtin.file', out_dir ~ '/' ~ item.file ~ '.yaml') | from_yaml).kind == item.kind
+        quiet: true
+      loop:
+        - { file: configmap, kind: ConfigMap }
+        - { file: secret, kind: Secret }
+        - { file: deployment, kind: Deployment }
+        - { file: service, kind: Service }
+
+    - name: Check replicas in the rendered Deployment
+      ansible.builtin.assert:
+        that:
+          - (lookup('ansible.builtin.file', out_dir ~ '/deployment.yaml') | from_yaml).spec.replicas == (app_replicas | int)
+        success_msg: "{{ app_env }}: manifests render, replicas={{ app_replicas }}"
