@@ -214,6 +214,15 @@ export VAULT_TOKEN=root
 ansible-playbook playbooks/vault-configure.yml       # 會要你輸入要存的 token，自己編一個
 ```
 
+> **Mac 才有的坑：`A worker was found in a dead state`**
+> 9-3 的 `hashi_lookup` 在 Mac 上可能直接出現這個錯誤，worker 程序被系統砍掉。原因是 Ansible 會 fork worker 執行 task，而 `hvac`/`requests` 在 Mac 上會讀系統 proxy 設定，呼叫到 Objective-C；macOS 的 fork 安全機制看到 fork 後的子程序用 Objective-C，就直接終止它。Linux（包括 GitHub Actions）不會發生。
+> 解法：在同一個終端機先設定
+> ```bash
+> export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+> export no_proxy='*'
+> ```
+> 注意：deploy 中斷後如果接著跑 verify，看到的會是**上一次**的部署結果，不代表這次成功。要看 deploy 自己的 PLAY RECAP。
+
 它做了四件事：
 1. 開啟 **Kubernetes auth**：讓 Pod 可以用自己的 ServiceAccount token 登入 Vault。
 2. 建 policy `hello-dev-read`：**只能讀** `secret/hello/dev` 這一個路徑。
