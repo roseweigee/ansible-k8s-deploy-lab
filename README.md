@@ -1,5 +1,7 @@
 # Ansible deployment to Kubernetes — self-study lab
 
+![lab](https://github.com/roseweigee/ansible-k8s-deploy-lab/actions/workflows/lab.yml/badge.svg)
+
 Deploys a small web app (Namespace, ServiceAccount, ConfigMap, Secret, Deployment, Service) to a Kubernetes
 cluster with Ansible and the `kubernetes.core` collection, for two environments (dev and prod)
 from one role.
@@ -76,6 +78,12 @@ ansible-playbook playbooks/teardown.yml           # clean up dev
 Set `app_k8s_context` (e.g. `-e app_k8s_context=kind-ansible-lab`) to target a specific kubeconfig context.
 
 The step-by-step notes, failure drills and results are in [docs/NOTES.zh-TW.md](docs/NOTES.zh-TW.md) (Traditional Chinese).
+
+## CI
+
+`.github/workflows/lab.yml` runs the whole lab on a fresh kind cluster for every push: lint and offline render,
+dev deploy and verify, the `changed=0` second run, `--check --diff`, prod with ansible-vault, the three failure
+drills (each must fail for the expected reason), then HashiCorp Vault in both `hashi_lookup` and `hashi_injector` modes.
 
 ## License
 

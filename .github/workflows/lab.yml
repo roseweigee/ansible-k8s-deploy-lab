@@ -1,0 +1,130 @@
+name: lab
+
+# Runs the whole lab end to end on a fresh kind cluster:
+# lint and offline render → dev deploy, verify, idempotency → --check --diff →
+# prod with ansible-vault → failure drills → HashiCorp Vault (lookup and injector).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible and Python clients
+        run: |
+          pip install ansible-core kubernetes hvac ansible-lint
+          ansible-galaxy collection install -r requirements.yml
+          ansible --version
+
+      - name: "Step 2: lint and offline render"
+        run: |
+          ansible-lint
+          ansible-playbook tests/render.yml
+          ansible-playbook tests/render.yml -e app_secret_mode=hashi_injector
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ansible-lab
+
+      - name: "Step 3: deploy dev and verify"
+        run: |
+          ansible-playbook playbooks/deploy.yml
+          ansible-playbook playbooks/verify.yml
+          kubectl get all -n hello-dev
+
+      - name: "Step 4: second run must report changed=0"
+        run: |
+          ansible-playbook playbooks/deploy.yml | tee run2.log
+          grep -E "localhost +: ok=[0-9]+ +changed=0 " run2.log
+
+      - name: "Step 5: --check --diff previews a change, then the real run rolls the pods"
+        run: |
+          ansible-playbook playbooks/deploy.yml --check --diff -e "app_message='Changed by CI'" | tee check.log
+          grep -E "changed=[1-9]" check.log
+          ansible-playbook playbooks/deploy.yml -e "app_message='Changed by CI'"
+          kubectl rollout status deployment/hello -n hello-dev --timeout=120s
+
+      - name: "Step 6: prod with ansible-vault"
+        run: |
+          openssl rand -hex 16 > .vault_pass
+          sed 's/change-me/ci-prod-token/' inventories/prod/vault.example.yml > inventories/prod/group_vars/all/vault.yml
+          ansible-vault encrypt --vault-password-file .vault_pass inventories/prod/group_vars/all/vault.yml
+          head -1 inventories/prod/group_vars/all/vault.yml
+          ansible-playbook -i inventories/prod/hosts.yml playbooks/deploy.yml --vault-password-file .vault_pass
+          ansible-playbook -i inventories/prod/hosts.yml playbooks/verify.yml --vault-password-file .vault_pass
+
+      - name: "Step 7: failure drills (each must fail, for the expected reason)"
+        run: |
+          set +e
+          ansible-playbook playbooks/deploy.yml -e app_image=nginxinc/nginx-unprivileged:does-not-exist -e app_rollout_timeout=45
+          test $? -ne 0 || { echo "bad image should have failed"; exit 1; }
+          kubectl get pods -n hello-dev
+          kubectl get pods -n hello-dev -o jsonpath='{.items[*].status.containerStatuses[*].state.waiting.reason}' | grep -E "ErrImagePull|ImagePullBackOff"
+
+          ansible-playbook playbooks/deploy.yml -e app_replicas=three 2>&1 | tee bad-var.log
+          grep -q "Invalid variables" bad-var.log
+
+          ansible-playbook -i inventories/prod/hosts.yml playbooks/deploy.yml 2>&1 | tee no-vault-pass.log
+          grep -q "no vault secrets found" no-vault-pass.log
+          set -e
+          ansible-playbook playbooks/deploy.yml -e "app_message='Changed by CI'"
+          ansible-playbook playbooks/verify.yml
+
+      - name: "Step 8: tear down prod"
+        run: ansible-playbook -i inventories/prod/hosts.yml playbooks/teardown.yml --vault-password-file .vault_pass
+
+      - name: "Step 9-1: install HashiCorp Vault (dev mode) with the Helm module"
+        run: |
+          ansible-playbook playbooks/vault-install.yml
+          kubectl get pods -n vault
+
+      - name: "Step 9-2..9-4: configure Vault, then deploy with hashi_lookup and hashi_injector"
+        env:
+          VAULT_TOKEN: root
+        run: |
+          kubectl port-forward -n vault svc/vault 8200:8200 > pf.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8200/v1/sys/health >/dev/null && break; sleep 1; done
+          ansible-playbook playbooks/vault-configure.yml -e seed_api_token=ci-vault-token
+
+          ansible-playbook playbooks/deploy.yml -e app_secret_mode=hashi_lookup
+          ansible-playbook playbooks/verify.yml
+          kubectl get secret hello-token -n hello-dev
+
+          ansible-playbook playbooks/deploy.yml -e app_secret_mode=hashi_injector
+          ansible-playbook playbooks/verify.yml -e app_secret_mode=hashi_injector
+          kubectl get pod -n hello-dev -o jsonpath='{.items[0].spec.initContainers[*].name}'; echo
+          if kubectl get secret hello-token -n hello-dev; then echo "Secret should be gone in injector mode"; exit 1; fi
+
+      - name: "Step 9-5: drill - wrong ServiceAccount is refused by Vault"
+        env:
+          VAULT_TOKEN: root
+        run: |
+          set +e
+          ansible-playbook playbooks/deploy.yml -e app_secret_mode=hashi_injector -e app_service_account=wrong-sa -e app_rollout_timeout=45
+          test $? -ne 0 || { echo "wrong ServiceAccount should have failed"; exit 1; }
+          set -e
+          POD=$(kubectl get pods -n hello-dev --sort-by=.metadata.creationTimestamp -o name | tail -1)
+          kubectl get pods -n hello-dev
+          kubectl logs -n hello-dev "$POD" -c vault-agent-init --tail=20 || true
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -40 || true
+          kubectl describe pods -n hello-dev || true
+          kubectl logs -n vault vault-0 --tail=50 || true
